@@ -1,0 +1,348 @@
+import os
+import ctypes
+import math
+import sys
+import pygame
+
+#=By Enzo PS= ================= 1. CONFIGURAÇÕES DE SISTEMA =================
+
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(1)
+except Exception:
+    ctypes.windll.user32.SetProcessDPIAware()
+
+os.environ['SDL_VIDEO_WINDOW_POS'] = "-1440,0"
+LARGURA, ALTURA = 2880, 900
+COLORKAY = (255, 0, 255)
+
+pygame.init()
+tela = pygame.display.set_mode((LARGURA, ALTURA), pygame.NOFRAME)
+
+hwnd = pygame.display.get_wm_info()["window"]
+color_ref = COLORKAY[0] | (COLORKAY[1] << 8) | (COLORKAY[2] << 16)
+ctypes.windll.user32.SetWindowLongW(hwnd, -20, ctypes.windll.user32.GetWindowLongW(hwnd, -20) | 0x80000)
+ctypes.windll.user32.SetLayeredWindowAttributes(hwnd, color_ref, 0, 1)
+ctypes.windll.user32.SetWindowPos(hwnd, -1, -1440, 0, LARGURA, ALTURA, 0x0040)
+
+clock = pygame.time.Clock()
+fonte = pygame.font.SysFont("Consolas", 16, bold=True)
+
+#=By Enzo PS= ================= 2. VARIÁVEIS DINÂMICAS (TUNING) =================
+config = {
+    "torque_volante": 0.6,
+    "inercia_giro": 0.88,
+    "aceleracao_base": 0.08,
+    "friccao_ar": 0.01,
+    "aderencia_drift": 0.98,
+    "escala": 120,          
+    "distancia_pivo": -18,
+    "rastro_ativo": True, 
+    "limite_vel": 0.5,
+    "suavidade_chicotada": 0.15,
+    "modo_mouse": False 
+}
+
+limites = {
+    "torque_volante": (0.1, 2.0),
+    "inercia_giro": (0.5, 0.99),
+    "aceleracao_base": (0.05, 1.0),
+    "friccao_ar": (0.01, 0.2),
+    "aderencia_drift": (0.5, 1),
+    "escala": (40, 300),
+    "distancia_pivo": (-50, 50),
+    "limite_vel": (0.5, 5.0),
+    "suavidade_chicotada": (0.01, 0.5)
+}
+
+#=By Enzo PS= ================= 3. CARRO E ESTADO =================
+x, y = LARGURA // 2, ALTURA // 2
+angulo = 0
+vel_x, vel_y = 0, 0
+vel_angular = 0
+direcao_suave = 0 
+clicou_rastro = False
+clicou_modo = False 
+menu_carros_aberto = False
+clicou_garagem = False
+
+rastros = [] 
+TEMPO_VIDA_RASTRO = 12000 
+
+lista_carros = ["Koenigsegg One:1", "Bugatti Chiron", "Mclaren P1", "Paggani Zonda", "Chevrolet Camaro", 
+                "Lamborghini Sexto Elemento", "Porsche 911 GT3", "Nissan Gtr R35", "Ferrari 488 pista", 
+                "Ford GT", "Lamborghini Countach", "Ferrari 458 Italia", "Bugatti Veyron Super Sport", 
+                "Bugatti Vision GT", "Ferrari Monza SP2", "Chevrolet Corvete", "Ford Shelby Mustang GT500", 
+                "Lamborghini Murcielago"]
+
+carro_index = 0
+cache_miniaturas = {}
+
+#=By Enzo PS= --- FUNÇÕES DE UTILIDADE ---
+
+def carregar_carro(index):
+    nome_arquivo = f"carro_{index}.png"
+    try:
+        img = pygame.image.load(nome_arquivo).convert_alpha() 
+        return img
+    except Exception:
+        surf = pygame.Surface((60, 120))
+        surf.fill((100, 100, 100))
+        return surf
+
+img_carro_base = carregar_carro(carro_index)
+
+def obter_miniatura(index, largura_alvo):
+    if index in cache_miniaturas:
+        return cache_miniaturas[index]
+    img = carregar_carro(index)
+    proporcao = img.get_width() / img.get_height()
+    h = int(largura_alvo / proporcao)
+    thumb = pygame.transform.smoothscale(img, (largura_alvo, h))
+    cache_miniaturas[index] = thumb
+    return thumb
+
+def renderizar_texto_quebrado(superficie, texto, cor, rect_alvo, fonte_usada):
+    palavras = texto.split(' ')
+    linhas = []
+    linha_atual = ""
+    largura_maxima = rect_alvo.width - 70 
+
+    for palavra in palavras:
+        test_line = linha_atual + palavra + " "
+        if fonte_usada.size(test_line)[0] < largura_maxima:
+            linha_atual = test_line
+        else:
+            linhas.append(linha_atual)
+            linha_atual = palavra + " "
+    linhas.append(linha_atual)
+
+    y_offset = 0
+    altura_total = len(linhas) * fonte_usada.get_linesize()
+    y_inicial = rect_alvo.y + (rect_alvo.height - altura_total) // 2
+    
+    for linha in linhas:
+        img_linha = fonte_usada.render(linha.strip(), True, cor)
+        superficie.blit(img_linha, (rect_alvo.x + 55, y_inicial + y_offset))
+        y_offset += fonte_usada.get_linesize()
+
+def desenhar_carro(superficie, x, y, angulo):
+    largura_orig = img_carro_base.get_width()
+    altura_orig = img_carro_base.get_height()
+    proporcao = largura_orig / altura_orig 
+    h = int(config["escala"])
+    w = int(h * proporcao)
+    carro_resized = pygame.transform.scale(img_carro_base, (w, h)) 
+    carro_rot = pygame.transform.rotate(carro_resized, -angulo)
+    rad = math.radians(angulo)
+    offset_x = math.sin(rad) * config["distancia_pivo"]
+    offset_y = -math.cos(rad) * config["distancia_pivo"]
+    rect = carro_rot.get_rect(center=(x + offset_x, y + offset_y))
+    superficie.blit(carro_rot, rect.topleft)
+
+class POINT(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+def get_global_mouse_pos():
+    pt = POINT()
+    ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+    return (pt.x + 1440, pt.y)
+
+#=By Enzo PS= ================= 4. LOOP PRINCIPAL =================
+painel_aberto = False
+painel_x = -300
+largura_painel = 320
+scroll_y = 0 
+
+while True:
+    tempo_atual = pygame.time.get_ticks()
+    mouse_pos = get_global_mouse_pos() 
+    mouse_pressionado = pygame.mouse.get_pressed()[0]
+    
+    for evento in pygame.event.get():
+        if evento.type == pygame.QUIT:
+            pygame.quit(); sys.exit()
+        if evento.type == pygame.MOUSEBUTTONDOWN:
+            if evento.button == 4: scroll_y = min(scroll_y + 30, 0)
+            if evento.button == 5: scroll_y -= 30
+
+    teclas = pygame.key.get_pressed()
+    if teclas[pygame.K_ESCAPE]: break
+
+    #=By Enzo PS= --- LÓGICA DE MOVIMENTO --- 
+    if not config["modo_mouse"]:
+        direcao_alvo = (teclas[pygame.K_RIGHT] or teclas[pygame.K_d]) - (teclas[pygame.K_LEFT] or teclas[pygame.K_a])
+        direcao_suave += (direcao_alvo - direcao_suave) * config["suavidade_chicotada"] 
+        acelerando = teclas[pygame.K_UP] or teclas[pygame.K_w]
+        espaco = teclas[pygame.K_SPACE]
+        if abs(vel_x) + abs(vel_y) > 0.5:
+            vel_angular += direcao_suave * (config["torque_volante"]) 
+    else:
+        dx_mouse = mouse_pos[0] - x
+        dy_mouse = mouse_pos[1] - y
+        distancia = math.hypot(dx_mouse, dy_mouse) 
+        angulo_alvo = math.degrees(math.atan2(dx_mouse, -dy_mouse)) 
+        diff_ang = (angulo_alvo - angulo + 180) % 360 - 180
+        if distancia > 20:
+            vel_angular = diff_ang * 0.5 * config["torque_volante"]
+            acelerando = distancia > 45
+        else:
+            vel_angular *= 0.9
+            acelerando = False
+        espaco = False
+
+    #=By Enzo PS= --- FÍSICA ---
+    vel_angular *= config["inercia_giro"] 
+    angulo += vel_angular
+    if acelerando:
+        rad = math.radians(angulo)
+        vel_x += math.sin(rad) * config["aceleracao_base"] / 2
+        vel_y -= math.cos(rad) * config["aceleracao_base"] / 2
+    
+    rad = math.radians(angulo)
+    dir_f_x, dir_f_y = math.sin(rad), -math.cos(rad)
+    vel_frontal = vel_x * dir_f_x + vel_y * dir_f_y
+    
+    if vel_frontal > config["limite_vel"]: vel_frontal = config["limite_vel"]
+    if vel_frontal < -config["limite_vel"] / 2: vel_frontal = -config["limite_vel"] / 2
+    
+    vel_lat_x, vel_lat_y = vel_x - dir_f_x * vel_frontal, vel_y - dir_f_y * vel_frontal
+    aderencia = 0.70 if espaco else config["aderencia_drift"]
+    vel_x = dir_f_x * vel_frontal + vel_lat_x * aderencia
+    vel_y = dir_f_y * vel_frontal + vel_lat_y * aderencia
+    
+    atrito = (1 - config["friccao_ar"] + (-0.05 if espaco else 0))
+    vel_x *= atrito; vel_y *= atrito
+    x += vel_x * 10; y += vel_y * 10
+
+    #=By Enzo PS= --- RASTRO ---
+    if config["rastro_ativo"] and (abs(vel_x) > 0.2 or abs(vel_y) > 0.2): 
+        rad_r = math.radians(angulo)
+        dist_atras = config["escala"] * 0.35
+        larg_eixo = config["escala"] * 0.18
+        bx, by = x - math.sin(rad_r) * dist_atras, y + math.cos(rad_r) * dist_atras
+        dx, dy = math.cos(rad_r) * larg_eixo, math.sin(rad_r) * larg_eixo
+        rastros.append({"pos": (bx + dx, by + dy), "tempo": tempo_atual})
+        rastros.append({"pos": (bx - dx, by - dy), "tempo": tempo_atual})
+    rastros = [r for r in rastros if tempo_atual - r["tempo"] < TEMPO_VIDA_RASTRO]
+
+    if x < 0: x = LARGURA
+    elif x > LARGURA: x = 0
+    if y < 0: y = ALTURA
+    elif y > ALTURA: y = 0
+
+    #=By Enzo PS= --- DESENHO ---
+    tela.fill(COLORKAY)
+    for r in rastros: pygame.draw.circle(tela, (25, 25, 25), (int(r["pos"][0]), int(r["pos"][1])), 2) 
+    desenhar_carro(tela, x, y, angulo)
+
+    #=By Enzo PS= --- UI: PAINEL LATERAL (ESCONDIDO COM BOTÃO CENTRAL) ---
+    #=By Enzo PS= Se fechado, o painel recua totalmente para fora da tela (-largura_painel)
+    alvo_x = 0 if painel_aberto else -largura_painel 
+    painel_x += (alvo_x - painel_x) * 0.15
+    
+    #=By Enzo PS= Desenho do corpo do Painel
+    rect_painel = pygame.Rect(painel_x, 50, largura_painel, ALTURA - 100)
+    pygame.draw.rect(tela, (20, 20, 20), rect_painel, border_radius=15)
+    pygame.draw.rect(tela, (255, 150, 0), rect_painel, 2, border_radius=15)
+
+    #=By Enzo PS= --- BOTÃO DE ABRIR/FECHAR (CENTRALIZADO NO PAINEL) ---
+    #=By Enzo PS= Criamos um botão pequeno que fica sempre na borda direita do painel
+    larg_btn, alt_btn = 40, 80
+    #=By Enzo PS= O botão fica no centro vertical do painel (ALTURA // 2)
+    seta_rect = pygame.Rect(painel_x + largura_painel, (ALTURA // 2) - (alt_btn // 2), larg_btn, alt_btn)
+    
+    #=By Enzo PS= Desenho do botão (apenas se o painel estiver fechado ou quase fechado para um visual limpo)
+    cor_btn = (255, 150, 0) if seta_rect.collidepoint(mouse_pos) else (200, 80, 0)
+    pygame.draw.rect(tela, cor_btn, seta_rect, border_radius=8)
+    
+    #=By Enzo PS= Ícone do botão (opcional: desenha uma seta ou símbolo)
+    simbolo = "<" if painel_aberto else ">"
+    texto_seta = fonte.render(simbolo, True, (255, 255, 255))
+    tela.blit(texto_seta, (seta_rect.x + 15, seta_rect.y + 30))
+
+    #=By Enzo PS= Lógica de clique para abrir/fechar
+    if mouse_pressionado and seta_rect.collidepoint(mouse_pos):
+        if not clicou_modo and not menu_carros_aberto: 
+            painel_aberto = not painel_aberto
+            clicou_modo = True
+            pygame.time.delay(50)
+    elif not mouse_pressionado: 
+        clicou_modo = False
+
+    if painel_x > -largura_painel + 50:
+        y_tuning = 80
+        btn_garagem = pygame.Rect(painel_x + 20, y_tuning, 250, 40)
+        hover_g = btn_garagem.collidepoint(mouse_pos)
+        pygame.draw.rect(tela, (255, 130, 0) if hover_g else (200, 80, 0), btn_garagem, border_radius=8)
+        tela.blit(fonte.render("ABRIR GARAGEM", True, (255, 255, 255)), (btn_garagem.x + 60, btn_garagem.y + 12))
+        
+        if mouse_pressionado and hover_g and not clicou_garagem:
+            menu_carros_aberto = True
+            clicou_garagem = True
+            painel_aberto = False
+        
+        y_tuning += 60
+        for label, config_key, cor_on in [("CONTROLE", "modo_mouse", (0, 120, 255)), ("RASTRO", "rastro_ativo", (0, 150, 0))]:
+            btn_rect = pygame.Rect(painel_x + 20, y_tuning, 250, 30)
+            status = "MOUSE" if config_key == "modo_mouse" and config[config_key] else "ON" if config[config_key] else "OFF"
+            cor_final = cor_on if config[config_key] else (60, 60, 60)
+            pygame.draw.rect(tela, cor_final, btn_rect, border_radius=5)
+            tela.blit(fonte.render(f"{label}: {status}", True, (255, 255, 255)), (btn_rect.x + 10, btn_rect.y + 7))
+            if mouse_pressionado and btn_rect.collidepoint(mouse_pos) and not clicou_rastro:
+                config[config_key] = not config[config_key]
+                clicou_rastro = True
+                pygame.time.delay(50)
+            y_tuning += 40
+        if not mouse_pressionado: clicou_rastro = False; clicou_garagem = False
+
+        y_tuning += 10
+        for chave, valor in config.items():
+            if chave in ["rastro_ativo", "modo_mouse"]: continue 
+            tela.blit(fonte.render(f"{chave.upper()}: {valor:.2f}", True, (255, 255, 255)), (painel_x + 20, y_tuning))
+            barra_rect = pygame.Rect(painel_x + 20, y_tuning + 20, 250, 10)
+            pygame.draw.rect(tela, (60, 60, 60), barra_rect)
+            min_v, max_v = limites[chave]
+            porc = (valor - min_v) / (max_v - min_v)
+            pygame.draw.rect(tela, (255, 150, 0), (barra_rect.x + (porc * barra_rect.w) - 5, barra_rect.y - 5, 10, 20))
+            if mouse_pressionado and barra_rect.inflate(20, 30).collidepoint(mouse_pos):
+                rel = max(0, min(1, (mouse_pos[0] - barra_rect.x) / barra_rect.w))
+                config[chave] = min_v + rel * (max_v - min_v)
+            y_tuning += 55
+
+   #=By Enzo PS= --- MENU DE CARROS (GARAGEM) ---
+    if menu_carros_aberto:
+        larg_menu, alt_menu = 1400, 800
+        menu_rect = pygame.Rect((1440 - larg_menu)//2, (ALTURA - alt_menu)//2, larg_menu, alt_menu)
+        pygame.draw.rect(tela, (30, 30, 30), menu_rect, border_radius=15)
+        pygame.draw.rect(tela, (255, 150, 0), menu_rect, 2, border_radius=15)
+        
+        tela.blit(pygame.font.SysFont("Consolas", 24, bold=True).render("GARAGEM", True, (255, 255, 255)), (menu_rect.x + 30, menu_rect.y + 20))
+
+        larg_card, alt_card = 240, 100
+        for i, nome in enumerate(lista_carros):
+            col, lin = i % 5, i // 5 #=By Enzo PS= Ajustado para 5 colunas para caber melhor
+            item_rect = pygame.Rect(menu_rect.x + 30 + (col * (larg_card + 15)), menu_rect.y + 70 + (lin * (alt_card + 15)), larg_card, alt_card)
+            
+            is_hover = item_rect.collidepoint(mouse_pos)
+            cor_bg = (255, 150, 0) if i == carro_index else (60, 60, 60) if is_hover else (45, 45, 45)
+            pygame.draw.rect(tela, cor_bg, item_rect, border_radius=10)
+
+            thumb = obter_miniatura(i, 40) 
+            tela.blit(thumb, (item_rect.x + 10, item_rect.y + (alt_card - thumb.get_height())//2))
+
+            cor_txt = (0, 0, 0) if i == carro_index else (255, 255, 255)
+            renderizar_texto_quebrado(tela, nome, cor_txt, item_rect, fonte)
+
+            if mouse_pressionado and is_hover:  
+                carro_index = i
+                img_carro_base = carregar_carro(i)
+                rastros = []
+
+        btn_fechar = pygame.Rect(menu_rect.right - 45, menu_rect.y + 15, 30, 30)
+        pygame.draw.rect(tela, (200, 0, 0), btn_fechar, border_radius=5)
+        tela.blit(fonte.render("X", True, (255, 255, 255)), (btn_fechar.x + 10, btn_fechar.y + 7))
+        if mouse_pressionado and btn_fechar.collidepoint(mouse_pos):
+            menu_carros_aberto = False
+
+    pygame.display.flip()
+    clock.tick(60)
